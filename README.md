@@ -28,7 +28,7 @@ Why Apple Silicon only:
 ## Build
 
 ```bash
-git clone https://github.com/YOUR-USERNAME/xarticle-reader.git
+git clone https://github.com/miningstore/xarticle-reader.git
 cd xarticle-reader
 swift build
 ```

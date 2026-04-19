@@ -67,7 +67,7 @@ actor LocalModelTTSRuntime {
         }
 
         let ready = modelReadyMarkerURL(for: backendID)
-        if fileManager.fileExists(atPath: ready.path) {
+        if fileManager.fileExists(atPath: ready.path), (try? dependenciesLookHealthy()) == true {
             return SpeechEngineStatus(isPreparing: false, isReady: true, progress: 1, message: readyMessage(for: backendID))
         }
 
@@ -171,7 +171,7 @@ actor LocalModelTTSRuntime {
         audioURL: URL,
         statusHandler: (@Sendable (SpeechEngineStatus) -> Void)? = nil
     ) async throws -> [AlignedWordTiming] {
-        if let cached = cachedWordTimings(for: request), !cached.isEmpty {
+        if let cached = cachedWordTimings(for: request) {
             return cached
         }
 
@@ -189,7 +189,7 @@ actor LocalModelTTSRuntime {
         statusHandler?(SpeechEngineStatus(isPreparing: true, isReady: false, progress: 0.97, message: "Aligning spoken words to the article text locally…"))
         try await run(process, backendID: request.backendID)
 
-        guard let aligned = cachedWordTimings(for: request), !aligned.isEmpty else {
+        guard let aligned = cachedWordTimings(for: request) else {
             throw LocalModelRuntimeError.commandFailed("The local speech runtime finished, but word alignment could not be prepared.")
         }
 
