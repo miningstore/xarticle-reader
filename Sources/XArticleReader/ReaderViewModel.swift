@@ -5,12 +5,22 @@ import SwiftData
 @Observable
 @MainActor
 final class ReaderViewModel {
+    private static let wordHighlightingEnabledKey = "reader.wordHighlightingEnabled"
+
     var selectedArticle: Article?
     var selectedRange: NSRange?
     var selectedText: String = ""
     var activeParagraphIndex: Int?
     var activeParagraphRange: NSRange?
     var activeWordRange: NSRange?
+    var isWordHighlightingEnabled: Bool = UserDefaults.standard.object(forKey: wordHighlightingEnabledKey) as? Bool ?? false {
+        didSet {
+            UserDefaults.standard.set(isWordHighlightingEnabled, forKey: Self.wordHighlightingEnabledKey)
+            if !isWordHighlightingEnabled {
+                activeWordRange = nil
+            }
+        }
+    }
 
     func selectArticle(_ article: Article?) {
         selectedArticle = article
@@ -41,7 +51,12 @@ final class ReaderViewModel {
     func syncPlayback(paragraphIndex: Int?, paragraphRange: NSRange?, wordRange: NSRange?) {
         activeParagraphIndex = paragraphIndex
         activeParagraphRange = paragraphRange
-        activeWordRange = wordRange
+        activeWordRange = isWordHighlightingEnabled ? wordRange : nil
+    }
+
+    func setWordHighlightingEnabled(_ enabled: Bool, paragraphIndex: Int?, paragraphRange: NSRange?, wordRange: NSRange?) {
+        isWordHighlightingEnabled = enabled
+        syncPlayback(paragraphIndex: paragraphIndex, paragraphRange: paragraphRange, wordRange: wordRange)
     }
 
     func addHighlight(using modelContext: ModelContext) {

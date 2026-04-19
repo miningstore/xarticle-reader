@@ -13,6 +13,7 @@ XArticleReader is a local-first macOS reader for long-form pasted articles. You 
 - Auto-follow the currently spoken text while listening
 - Cache generated audio locally so replay does not regenerate the same chunk again
 - Cache per-word timing sidecars from the generated audio so word highlighting is driven by real aligned timings instead of guessed word weights
+- Keep experimental word highlighting disabled by default unless the user explicitly turns it on in `Manage Voices`
 
 ## Requirements
 
@@ -88,6 +89,18 @@ and a direct local runtime probe that:
 - No direct X URL fetching yet
 - Local-only storage
 - Local model playback with cached audio and aligned word highlighting
+
+## Known issue / help wanted
+
+Word highlighting is still broken enough that it ships disabled by default for new installs.
+
+Current behavior can still:
+
+- lag behind the spoken audio
+- skip short words during playback
+- imperfectly map the highlighted range for some tokens
+
+If you want to help improve this, please see the GitHub issue tracker. Contributions or ideas around stricter forced alignment, better renderer integration, or more accurate local timing extraction would be very welcome.
 
 ## Notes
 

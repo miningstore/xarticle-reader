@@ -687,11 +687,13 @@ private struct SelectionActionBar: View {
 
 private struct VoiceSettingsPopover: View {
     @Environment(SpeechPlaybackService.self) private var speechService
+    @Environment(ReaderViewModel.self) private var readerViewModel
 
     let article: Article
     @State private var draftBackendID: SpeechBackendID = .kokoro
     @State private var draftVoiceID: String = ""
     @State private var draftSpeed: Double = SpeechPlaybackService.defaultSpeed
+    @State private var draftWordHighlightingEnabled = false
     @State private var didSeedDraft = false
 
     var body: some View {
@@ -720,6 +722,19 @@ private struct VoiceSettingsPopover: View {
                         .foregroundStyle(ReaderTheme.secondaryText)
                 }
                 Slider(value: speedBinding, in: 0.75...2.0, step: 0.25)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Toggle(isOn: highlightingBinding) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Experimental word highlighting")
+                        Text("Off by default. Current highlighting is still broken and can lag, skip words, or map imperfectly.")
+                            .font(.caption)
+                            .foregroundStyle(ReaderTheme.secondaryText)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .toggleStyle(.switch)
             }
 
             if let status = speechService.backendStatuses[draftBackendID] {
@@ -764,6 +779,13 @@ private struct VoiceSettingsPopover: View {
         )
     }
 
+    private var highlightingBinding: Binding<Bool> {
+        Binding(
+            get: { draftWordHighlightingEnabled },
+            set: { draftWordHighlightingEnabled = $0 }
+        )
+    }
+
     private var draftVoices: [VoiceOption] {
         LocalModelCatalog.profile(for: draftBackendID)?.voices ?? []
     }
@@ -774,6 +796,7 @@ private struct VoiceSettingsPopover: View {
         draftBackendID = speechService.selectedBackendID
         draftSpeed = speechService.speed
         draftVoiceID = speechService.selectedVoiceID
+        draftWordHighlightingEnabled = readerViewModel.isWordHighlightingEnabled
         if !draftVoices.contains(where: { $0.id == draftVoiceID }) {
             draftVoiceID = defaultVoiceID(for: draftBackendID)
         }
@@ -796,6 +819,15 @@ private struct VoiceSettingsPopover: View {
 
         if draftSpeed != speechService.speed {
             speechService.updateSpeed(draftSpeed, for: article)
+        }
+
+        if draftWordHighlightingEnabled != readerViewModel.isWordHighlightingEnabled {
+            readerViewModel.setWordHighlightingEnabled(
+                draftWordHighlightingEnabled,
+                paragraphIndex: speechService.currentParagraphIndex,
+                paragraphRange: speechService.currentParagraphRange,
+                wordRange: speechService.currentWordRange
+            )
         }
     }
 
