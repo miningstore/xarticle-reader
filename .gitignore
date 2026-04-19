@@ -1,5 +1,15 @@
+.DS_Store
+.build/
+.swiftpm/
+.codex/
+.beads/
 
-# Beads / Dolt files (added by bd init)
-.dolt/
-*.db
-.beads-credential-key
+input/
+output/
+*.mp3
+*.wav
+*.m4a
+*.aifc
+
+xcuserdata/
+DerivedData/
