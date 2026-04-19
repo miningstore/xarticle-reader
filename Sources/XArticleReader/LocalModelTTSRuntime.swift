@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 
 struct LocalModelSynthesisRequest {
@@ -500,11 +501,10 @@ actor LocalModelTTSRuntime {
     }
 
     nonisolated private static func safelyStop(_ process: Process?) {
-        guard let process, process.isRunning else { return }
-        process.interrupt()
-        if process.isRunning {
-            process.terminate()
-        }
+        guard let process else { return }
+        let pid = process.processIdentifier
+        guard pid > 0, process.isRunning else { return }
+        _ = Darwin.kill(pid, SIGTERM)
     }
 
     private func run(_ process: Process) throws {

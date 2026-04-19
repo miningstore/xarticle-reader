@@ -335,8 +335,13 @@ final class SpeechPlaybackService {
         configure(for: article)
 
         let maxLength = article.bodyText.utf16.count
-        let currentTime = playbackTime(for: article.lastReadPosition, in: article)
-        let newOffset = textOffset(forPlaybackTime: currentTime + delta, in: article)
+        let baselineTime: TimeInterval
+        if currentArticleID == article.id, (isPlaying || isStartingPlayback || currentAdapter.isPaused) {
+            baselineTime = currentPlaybackOffset
+        } else {
+            baselineTime = playbackTime(for: article.lastReadPosition, in: article)
+        }
+        let newOffset = textOffset(forPlaybackTime: baselineTime + delta, in: article)
         let clampedOffset = max(0, min(newOffset, maxLength))
         seek(toTextOffset: clampedOffset, in: article)
     }
@@ -362,13 +367,14 @@ final class SpeechPlaybackService {
         article.lastPlaybackOffset = currentPlaybackOffset
         updatePendingChunkProgress(for: newOffset)
 
-        if currentAdapter.isSpeaking || currentAdapter.isPaused {
+        if isStartingPlayback || currentAdapter.isSpeaking || currentAdapter.isPaused {
+            let targetChunkIndex = currentChunkIndex ?? 0
             stopSpeaking()
             isStartingPlayback = true
             requestPlaybackFollow()
             playbackTask = Task { [weak self] in
                 guard let self else { return }
-                await speakChunk(at: currentChunkIndex ?? 0, for: article)
+                await speakChunk(at: targetChunkIndex, for: article)
             }
         }
     }
@@ -999,6 +1005,12 @@ extension SystemSpeechAdapter: @preconcurrency AVSpeechSynthesizerDelegate {
 
 @MainActor
 final class LocalModelSpeechAdapter: NSObject, SpeechBackendAdapter {
+    private struct DisplayWordCue {
+        let range: NSRange
+        let startBoundary: TimeInterval
+        let endBoundary: TimeInterval
+    }
+
     let backendID: SpeechBackendID
     weak var delegate: SpeechBackendAdapterDelegate?
 
@@ -1023,6 +1035,7 @@ final class LocalModelSpeechAdapter: NSObject, SpeechBackendAdapter {
     private var currentOutputURL: URL?
     private let runtime = LocalModelTTSRuntime.shared
     private var alignedWordTimings: [AlignedWordTiming] = []
+    private var displayWordCues: [DisplayWordCue] = []
     private var cueTimer: Timer?
     private var currentText: String = ""
     private var lastEmittedWordIndex: Int?
@@ -1050,7 +1063,9 @@ final class LocalModelSpeechAdapter: NSObject, SpeechBackendAdapter {
         player.prepareToPlay()
         self.player = player
         currentText = text
-        alignedWordTimings = await runtime.cachedWordTimings(for: request) ?? approximateWordTimings(for: text, duration: player.duration)
+        let rawTimings = await runtime.cachedWordTimings(for: request) ?? approximateWordTimings(for: text, duration: player.duration)
+        alignedWordTimings = remapWordRangesForRenderedText(rawTimings, text: text)
+        displayWordCues = buildDisplayWordCues(from: alignedWordTimings, totalDuration: player.duration)
         lastEmittedWordIndex = nil
         player.play()
         startCueTimer()
@@ -1082,6 +1097,7 @@ final class LocalModelSpeechAdapter: NSObject, SpeechBackendAdapter {
         cueTimer?.invalidate()
         cueTimer = nil
         alignedWordTimings = []
+        displayWordCues = []
         currentText = ""
         lastEmittedWordIndex = nil
         if let currentOutputURL {
@@ -1124,14 +1140,72 @@ final class LocalModelSpeechAdapter: NSObject, SpeechBackendAdapter {
         }
     }
 
+    private func remapWordRangesForRenderedText(_ timings: [AlignedWordTiming], text: String) -> [AlignedWordTiming] {
+        let nsText = text as NSString
+        let fullRange = NSRange(location: 0, length: nsText.length)
+        let regex = try? NSRegularExpression(pattern: #"\b[\p{L}\p{N}'’-]+\b"#)
+        let matches = regex?.matches(in: text, range: fullRange) ?? []
+        guard !matches.isEmpty, !timings.isEmpty else { return timings }
+
+        func normalized(_ value: String) -> String {
+            value
+                .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+                .unicodeScalars
+                .filter { CharacterSet.alphanumerics.contains($0) }
+                .map(String.init)
+                .joined()
+        }
+
+        let normalizedMatches: [(range: NSRange, token: String)] = matches.compactMap { match in
+            let token = nsText.substring(with: match.range)
+            let normalizedToken = normalized(token)
+            guard !normalizedToken.isEmpty else { return nil }
+            return (match.range, normalizedToken)
+        }
+
+        guard !normalizedMatches.isEmpty else { return timings }
+
+        var remapped: [AlignedWordTiming] = []
+        var cursor = 0
+
+        for timing in timings {
+            let normalizedTiming = normalized(timing.word)
+            guard !normalizedTiming.isEmpty else { continue }
+
+            var chosenIndex = cursor
+            while chosenIndex < normalizedMatches.count, normalizedMatches[chosenIndex].token != normalizedTiming {
+                chosenIndex += 1
+            }
+
+            if chosenIndex >= normalizedMatches.count {
+                chosenIndex = min(cursor, normalizedMatches.count - 1)
+            }
+
+            let range = normalizedMatches[chosenIndex].range
+            let renderedWord = nsText.substring(with: range)
+            remapped.append(
+                AlignedWordTiming(
+                    word: renderedWord,
+                    startTime: timing.startTime,
+                    endTime: timing.endTime,
+                    startOffset: range.location,
+                    endOffset: NSMaxRange(range)
+                )
+            )
+            cursor = min(chosenIndex + 1, normalizedMatches.count)
+        }
+
+        return remapped.isEmpty ? timings : remapped
+    }
+
     private func startCueTimer() {
         cueTimer?.invalidate()
-        cueTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+        cueTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.emitCueIfNeeded()
             }
         }
-        cueTimer?.tolerance = 1.0 / 120.0
+        cueTimer?.tolerance = 1.0 / 240.0
         if let cueTimer {
             RunLoop.main.add(cueTimer, forMode: .common)
         }
@@ -1143,33 +1217,31 @@ final class LocalModelSpeechAdapter: NSObject, SpeechBackendAdapter {
         guard player.isPlaying || timeOverride != nil else { return }
         publishPlaybackProgress()
 
-        guard let wordIndex = wordIndex(for: currentTime), alignedWordTimings.indices.contains(wordIndex) else { return }
+        guard let wordIndex = wordIndex(for: currentTime), displayWordCues.indices.contains(wordIndex) else { return }
         guard wordIndex != lastEmittedWordIndex else { return }
         lastEmittedWordIndex = wordIndex
-        let displayRange = alignedWordTimings[wordIndex].range
+        let displayRange = displayWordCues[wordIndex].range
         if displayRange.location != NSNotFound, displayRange.length > 0 {
             delegate?.speechAdapter(self, willSpeak: displayRange, utterance: currentText)
         }
     }
 
     private func wordIndex(for time: TimeInterval) -> Int? {
-        guard !alignedWordTimings.isEmpty else { return nil }
+        guard !displayWordCues.isEmpty else { return nil }
 
-        if let lastEmittedWordIndex, alignedWordTimings.indices.contains(lastEmittedWordIndex) {
-            let current = alignedWordTimings[lastEmittedWordIndex]
-            let nextIndex = lastEmittedWordIndex + 1
-            let nextStart = nextIndex < alignedWordTimings.count ? alignedWordTimings[nextIndex].startTime : .greatestFiniteMagnitude
-            if time >= current.startTime, time < nextStart {
+        if let lastEmittedWordIndex, displayWordCues.indices.contains(lastEmittedWordIndex) {
+            let current = displayWordCues[lastEmittedWordIndex]
+            if time >= current.startBoundary, time < current.endBoundary {
                 return lastEmittedWordIndex
             }
         }
 
         var low = 0
-        var high = alignedWordTimings.count - 1
+        var high = displayWordCues.count - 1
         var best = 0
         while low <= high {
             let mid = (low + high) / 2
-            if alignedWordTimings[mid].startTime <= time {
+            if displayWordCues[mid].startBoundary <= time {
                 best = mid
                 low = mid + 1
             } else {
@@ -1177,6 +1249,52 @@ final class LocalModelSpeechAdapter: NSObject, SpeechBackendAdapter {
             }
         }
         return best
+    }
+
+    private func buildDisplayWordCues(from timings: [AlignedWordTiming], totalDuration: TimeInterval) -> [DisplayWordCue] {
+        guard !timings.isEmpty else { return [] }
+        if timings.count == 1 {
+            return [
+                DisplayWordCue(
+                    range: timings[0].range,
+                    startBoundary: 0,
+                    endBoundary: max(totalDuration, timings[0].endTime, 0.01)
+                )
+            ]
+        }
+
+        let startTimes = timings.map(\.startTime)
+        let positiveGaps = zip(startTimes.dropLast(), startTimes.dropFirst())
+            .map { max(0, $1 - $0) }
+            .filter { $0 > 0.015 }
+            .sorted()
+        let medianGap = positiveGaps.isEmpty
+            ? max(totalDuration / Double(max(timings.count, 1)), 0.12)
+            : positiveGaps[positiveGaps.count / 2]
+        let averageWindow = max(totalDuration / Double(max(timings.count, 1)), 0.04)
+        let minimumWindow = min(max(averageWindow * 0.28, 0.045), 0.11)
+        let lead = min(max(medianGap * 0.32, 0.07), 0.24)
+
+        var boundaries = Array(repeating: 0.0, count: timings.count + 1)
+        boundaries[0] = 0
+        boundaries[timings.count] = max(totalDuration, timings.last?.endTime ?? totalDuration, 0.01)
+
+        for index in 1..<timings.count {
+            let midpoint = (timings[index - 1].startTime + timings[index].startTime) / 2
+            let rawBoundary = max(0, midpoint - lead)
+            let minAllowed = boundaries[index - 1] + minimumWindow
+            let remainingWords = timings.count - index
+            let maxAllowed = max(minAllowed, boundaries[timings.count] - (Double(remainingWords) * minimumWindow))
+            boundaries[index] = min(max(rawBoundary, minAllowed), maxAllowed)
+        }
+
+        return timings.enumerated().map { index, timing in
+            DisplayWordCue(
+                range: timing.range,
+                startBoundary: boundaries[index],
+                endBoundary: max(boundaries[index + 1], boundaries[index] + 0.01)
+            )
+        }
     }
 
     private func publishPlaybackProgress() {
